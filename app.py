@@ -1,145 +1,160 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+import io
 
-# --- 1. 페이지 설정 및 디자인 (어제의 깔끔한 스타일 재현) ---
-st.set_page_config(page_title="출석알리미", layout="centered")
+# --- 1. 페이지 설정 및 디자인 (이미지 스타일 재현) ---
+st.set_page_config(page_title="스마트 출석부", layout="centered")
 
 st.markdown("""
     <style>
-    /* 전체 배경 및 폰트 설정 */
-    .main { background-color: #f8f9fa; }
-    .stButton>button { border-radius: 8px; font-weight: 600; }
+    .main { background-color: white; }
+    /* 학년/반 헤더 스타일 */
+    .group-header {
+        font-size: 20px; font-weight: bold; padding: 15px 0;
+        border-bottom: 2px solid #333; margin-top: 20px;
+    }
+    /* 학생 이름 밑줄 스타일 */
+    .student-name {
+        font-size: 18px; text-decoration: underline; color: #333; font-weight: 500;
+    }
+    .student-id { color: #666; font-size: 16px; margin-right: 15px; }
     
-    /* 학교 선택 버튼 스타일 */
-    .school-tag { display: inline-block; padding: 5px 15px; margin: 5px; border-radius: 20px; background-color: #e9ecef; cursor: pointer; border: 1px solid #dee2e6; }
-    .active-tag { background-color: #007bff; color: white; border-color: #007bff; }
-    
-    /* 학생 리스트 한 줄 디자인 */
-    .student-card { background: white; padding: 10px; border-radius: 10px; margin-bottom: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    .tel-icon { font-size: 20px; text-decoration: none; margin-right: 10px; }
-    
-    /* 버튼 간격 조정 */
-    .stHorizontalBlock { gap: 0.5rem !important; }
+    /* 버튼 스타일 커스텀 */
+    div.stButton > button {
+        border: 1px solid #ccc; background-color: white; color: #333;
+        padding: 2px 10px; font-size: 14px; height: 32px;
+    }
+    /* 출석/결석 색상 적용 (선택 시) */
+    .stButton button:active, .stButton button:focus { color: white !important; }
     </style>
     """, unsafe_allow_html=True)
 
 # 데이터 초기화
 if 'schools' not in st.session_state: st.session_state['schools'] = ["우리 학교"]
 if 'sel_sch' not in st.session_state: st.session_state['sel_sch'] = "우리 학교"
-if 'students' not in st.session_state: st.session_state['students'] = []
-if 'att_status' not in st.session_state: st.session_state['att_status'] = {}
+if 'students' not in st.session_state: st.session_state['students'] = pd.DataFrame(columns=['학교명', '그룹', '번호', '이름', '연락처'])
+if 'att_data' not in st.session_state: st.session_state['att_data'] = {} # {학생이름: 상태}
 
-# --- 2. 상단 학교 관리 (버튼형 선택창) ---
-st.title("📱 스마트 출석부")
+# --- 2. 상단 학교 선택 및 학생 등록 (엑셀 포함) ---
+st.title("📑 스마트 출석 시스템")
 
-# 학교 추가
-with st.expander("🏫 학교 추가/관리"):
-    c1, c2 = st.columns([3,1])
-    with c1: new_sch = st.text_input("새 학교명", label_visibility="collapsed")
-    with c2: 
-        if st.button("추가"):
+# 학교 추가/선택 (버튼형)
+col_sch_add, _ = st.columns([2, 1])
+with col_sch_add:
+    with st.expander("🏫 학교 관리"):
+        new_sch = st.text_input("새 학교명")
+        if st.button("학교 추가"):
             if new_sch and new_sch not in st.session_state['schools']:
                 st.session_state['schools'].append(new_sch)
-                st.session_state['sel_sch'] = new_sch
                 st.rerun()
 
-# 학교 선택 버튼 리스트
-st.write("📍 **학교 선택**")
-sch_cols = st.columns(4) # 한 줄에 4개씩 배치
+# 학교 선택 버튼 가로 배치
+sch_btns = st.columns(len(st.session_state['schools']))
 for i, sch in enumerate(st.session_state['schools']):
-    with sch_cols[i % 4]:
-        # 선택된 학교는 파란색 버튼(primary), 나머지는 일반 버튼
-        if st.button(sch, key=f"sch_{i}", type="primary" if st.session_state['sel_sch'] == sch else "secondary"):
+    with sch_btns[i]:
+        if st.button(sch, key=f"sch_{i}", type="primary" if st.session_state['sel_sch'] == sch else "secondary", use_container_width=True):
             st.session_state['sel_sch'] = sch
             st.rerun()
 
 st.divider()
 
-# --- 3. 컨트롤 버튼 (학생추가 / 시작 / 종료) ---
-c_act1, c_act2, c_act3 = st.columns(3)
-with c_act1:
-    if st.button("👤 학생추가", use_container_width=True): st.session_state['show_add'] = True
-with c_act2:
-    btn_start = st.button("🚀 수업시작", use_container_width=True)
-with c_act3:
-    btn_end = st.button("🔔 수업종료", use_container_width=True)
+# 학생 등록 섹션 (직접 + 엑셀)
+with st.expander("👤 학생 명단 등록 (직접 또는 엑셀)"):
+    tab_manual, tab_excel = st.tabs(["직접 입력", "엑셀 업로드"])
+    
+    with tab_manual:
+        with st.form("manual_reg", clear_on_submit=True):
+            c1, c2, c3, c4 = st.columns([1.5, 1, 1.5, 2])
+            f_group = c1.text_input("그룹(예: 1학년)", placeholder="1학년")
+            f_num = c2.text_input("번호")
+            f_name = c3.text_input("이름")
+            f_phone = c4.text_input("연락처")
+            if st.form_submit_button("등록", use_container_width=True):
+                new_row = pd.DataFrame({'학교명': [st.session_state['sel_sch']], '그룹': [f_group], '번호': [f_num], '이름': [f_name], '연락처': [f_phone]})
+                st.session_state['students'] = pd.concat([st.session_state['students'], new_row], ignore_index=True)
+                st.rerun()
+                
+    with tab_excel:
+        st.write("엑셀 컬럼: 그룹, 번호, 이름, 연락처")
+        up_file = st.file_uploader("엑셀 파일 선택 (.xlsx)", type=["xlsx"])
+        if up_file:
+            up_df = pd.read_excel(up_file)
+            up_df['학교명'] = st.session_state['sel_sch']
+            st.session_state['students'] = pd.concat([st.session_state['students'], up_df], ignore_index=True)
+            st.success("엑셀 업로드 완료!")
 
-# 학생 추가 팝업
-if st.session_state.get('show_add'):
-    with st.form("add_std"):
-        st.write("🆕 새로운 학생 등록")
-        col1, col2, col3 = st.columns(3)
-        with col1: f_cls = st.selectbox("반", ["A반", "B반"])
-        with col2: f_name = st.text_input("이름")
-        with col3: f_phone = st.text_input("연락처")
-        if st.form_submit_button("저장"):
-            s_id = datetime.now().strftime("%H%M%S%f")
-            st.session_state['students'].append({"id": s_id, "school": st.session_state['sel_sch'], "class": f_cls, "name": f_name, "phone": f_phone})
-            st.session_state['show_add'] = False
-            st.rerun()
+# --- 3. 컨트롤 버튼 (시작/종료 문자) ---
+st.write("")
+col_msg1, col_msg2, col_msg3 = st.columns([1,1,1])
+with col_msg1: btn_start = st.button("🚀 수업시작 문자", use_container_width=True)
+with col_msg2: btn_end = st.button("🔔 수업종료 문자", use_container_width=True)
+with col_msg3: 
+    if st.button("🗑️ 명단 초기화", type="secondary"): 
+        st.session_state['students'] = pd.DataFrame(columns=['학교명', '그룹', '번호', '이름', '연락처'])
+        st.rerun()
 
-# --- 4. 출석 체크 리스트 ---
-sel_cls = st.radio("반 선택", ["A반", "B반"], horizontal=True, label_visibility="collapsed")
-curr_stds = [s for s in st.session_state['students'] if s['school'] == st.session_state['sel_sch'] and s['class'] == sel_cls]
+# --- 4. 출석부 리스트 (이미지 스타일 적용) ---
+df = st.session_state['students']
+curr_school_stds = df[df['학교명'] == st.session_state['sel_sch']]
 
-# 단체 문자 발송 미리보기
+if curr_school_stds.empty:
+    st.info("등록된 학생이 없습니다.")
+else:
+    # 학년/그룹별로 정렬 및 그룹화
+    groups = curr_school_stds['그룹'].unique()
+    
+    for group_name in groups:
+        group_df = curr_school_stds[curr_school_stds['그룹'] == group_name]
+        st.markdown(f'<div class="group-header">{group_name} ({len(group_df)}명)</div>', unsafe_allow_html=True)
+        
+        for idx, row in group_df.iterrows():
+            # 학생 한 줄 레이아웃
+            st.write("") # 간격
+            c_info, c_att, c_late, c_early, c_absent = st.columns([2.5, 1, 1, 1, 1])
+            
+            with c_info:
+                # 번호 + 이름(밑줄) + 통화링크
+                st.markdown(f'<span class="student-id">{row["번호"]}</span> <a href="tel:{row["연락처"]}" style="text-decoration:none;"><span class="student-name">{row["이름"]}</span></a>', unsafe_allow_html=True)
+            
+            # 현재 상태 가져오기
+            s_key = f"{st.session_state['sel_sch']}_{group_name}_{row['이름']}"
+            curr_stat = st.session_state['att_data'].get(s_key, "미체크")
+            
+            # 버튼 클릭 시 색상 변경 로직 (초록/빨강 등)
+            with c_att:
+                if st.button("출석", key=f"btn_a_{idx}", help="출석"):
+                    st.session_state['att_data'][s_key] = "출석"
+            with c_late:
+                st.button("지각", key=f"btn_l_{idx}")
+            with c_early:
+                st.button("조퇴", key=f"btn_e_{idx}")
+            with c_absent:
+                if st.button("결석", key=f"btn_b_{idx}"):
+                    st.session_state['att_data'][s_key] = "결석"
+            
+            # 상태 표시 (선택된 경우 강조)
+            if curr_stat == "출석":
+                st.markdown(f'<p style="color:green; font-weight:bold; font-size:12px; margin:0; text-align:right;">● 출석체크됨</p>', unsafe_allow_html=True)
+            elif curr_stat == "결석":
+                st.markdown(f'<p style="color:red; font-weight:bold; font-size:12px; margin:0; text-align:right;">● 결석체크됨</p>', unsafe_allow_html=True)
+
+            st.markdown('<div style="border-bottom: 1px dashed #ddd; padding-top:5px;"></div>', unsafe_allow_html=True)
+
+# --- 5. 문자 발송 미리보기 ---
 if btn_start or btn_end:
     mode = "시작" if btn_start else "종료"
-    st.subheader(f"💬 {mode} 문자 발송")
-    for s in curr_stds:
-        stat = st.session_state['att_status'].get(s['id'], {"status": "출석", "reason": ""})
-        if mode == "시작":
-            msg = f"[{st.session_state['sel_sch']}] {s['name']} 학생 출석하였습니다." if stat['status'] == "출석" else f"[{st.session_state['sel_sch']}] {s['name']} 학생 결석하였습니다.({stat['reason']})"
-        else:
-            if stat['status'] == "결석": continue
-            msg = f"[{st.session_state['sel_sch']}] {s['name']} 학생 수업이 끝났습니다."
-        
-        final_msg = st.text_area(f"To: {s['name']}", value=msg, key=f"sms_{mode}_{s['id']}")
-        st.markdown(f'<a href="sms:{s["phone"]}?body={final_msg}" style="display:block; background-color:#007bff; color:white; padding:8px; border-radius:5px; text-decoration:none; text-align:center; font-size:14px;">메시지 전송</a>', unsafe_allow_html=True)
-    if st.button("닫기"): st.rerun()
     st.divider()
-
-# --- 학생 명단 루프 (어제처럼 깔끔한 한 줄 구성) ---
-for s in curr_stds:
-    # 한 줄 컬럼 배치
-    col_call, col_info, col_att, col_edit = st.columns([0.4, 1.2, 2.3, 0.4])
-    
-    with col_call: # 통화 아이콘
-        st.markdown(f'<a href="tel:{s["phone"]}" class="tel-icon">📞</a>', unsafe_allow_html=True)
-    
-    with col_info: # 이름 (연락처 제외하고 이름만 강조)
-        st.write(f"**{s['name']}**")
-    
-    with col_att: # 출석/결석 (가로형 라디오)
-        cur_val = st.session_state['att_status'].get(s['id'], {"status": "출석", "reason": ""})
-        new_val = st.radio(f"r_{s['id']}", ["출석", "결석"], 
-                           index=0 if cur_val['status']=="출석" else 1, 
-                           key=f"radio_{s['id']}", horizontal=True, label_visibility="collapsed")
-        st.session_state['att_status'][s['id']] = {"status": new_val, "reason": cur_val['reason']}
-    
-    with col_edit: # 수정 아이콘
-        if st.button("✏️", key=f"ed_{s['id']}"):
-            st.session_state['edit_id'] = s['id']
-
-    # 결석 사유창 (결석 시에만 바로 아래 깔끔하게 표시)
-    if new_val == "결석":
-        res = st.text_input(f"사유({s['name']})", value=cur_val['reason'], key=f"res_{s['id']}", placeholder="결석 사유를 입력하세요", label_visibility="collapsed")
-        st.session_state['att_status'][s['id']]['reason'] = res
-
-    # 수정/삭제 모달
-    if st.session_state.get('edit_id') == s['id']:
-        with st.form(f"edit_f_{s['id']}"):
-            st.write(f"📝 {s['name']} 학생 정보 수정")
-            u_n = st.text_input("이름", value=s['name'])
-            u_p = st.text_input("연락처", value=s['phone'])
-            c1, c2 = st.columns(2)
-            if c1.form_submit_button("수정 완료"):
-                s['name'], s['phone'] = u_n, u_p
-                st.session_state['edit_id'] = None
-                st.rerun()
-            if c2.form_submit_button("🗑️ 학생 삭제"):
-                st.session_state['students'] = [std for std in st.session_state['students'] if std['id'] != s['id']]
-                st.session_state['edit_id'] = None
-                st.rerun()
-    st.markdown('<div style="height:1px; background-color:#eee; margin:5px 0;"></div>', unsafe_allow_html=True)
+    st.subheader(f"💬 {mode} 알림 문자")
+    for idx, row in curr_school_stds.iterrows():
+        s_key = f"{st.session_state['sel_sch']}_{row['그룹']}_{row['이름']}"
+        stat = st.session_state['att_data'].get(s_key, "출석")
+        
+        if mode == "시작":
+            msg = f"[{st.session_state['sel_sch']}] {row['이름']} 학생 안전하게 출석하였습니다." if stat == "출석" else f"[{st.session_state['sel_sch']}] {row['이름']} 학생 결석입니다. 확인 부탁드립니다."
+        else:
+            if stat == "결석": continue
+            msg = f"[{st.session_state['sel_sch']}] {row['이름']} 학생 수업 종료 후 하가하였습니다."
+            
+        final_msg = st.text_area(f"To: {row['이름']}", value=msg, key=f"sms_{idx}")
+        st.markdown(f'<a href="sms:{row["연락처"]}?body={final_msg}" style="display:block; text-align:center; background:#007bff; color:white; padding:10px; border-radius:5px; text-decoration:none;">문자 전송하기</a>', unsafe_allow_html=True)
