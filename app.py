@@ -1,155 +1,140 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-import io
 
-# --- 1. 초기 설정 및 데이터 관리 ---
-st.set_page_config(page_title="출석알리미 Pro", layout="centered")
+# --- 1. 초기 설정 및 CSS (모바일 최적화) ---
+st.set_page_config(page_title="출석체크 스마트 알리미", layout="centered")
 
-# 데이터 유지를 위한 세션 상태 초기화
+st.markdown("""
+    <style>
+    .stButton > button { width: 100%; border-radius: 5px; margin-bottom: 5px; }
+    .student-row { padding: 10px; border-bottom: 1px solid #eee; align-items: center; }
+    div[data-testid="column"] { display: flex; align-items: center; justify-content: center; }
+    .tel-link { text-decoration: none; font-size: 20px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# 데이터 초기화
 if 'schools' not in st.session_state:
     st.session_state['schools'] = ["우리 학교"]
 if 'students' not in st.session_state:
-    # 컬럼: 학교명, 반, 이름, 연락처
-    st.session_state['students'] = pd.DataFrame(columns=['학교명', '반', '이름', '연락처'])
-if 'history' not in st.session_state:
-    # 컬럼: 날짜, 학교명, 반, 이름, 상태, 사유
-    st.session_state['history'] = pd.DataFrame(columns=['날짜', '학교명', '반', '이름', '상태', '사유'])
+    st.session_state['students'] = [] # 리스트 형태 저장
+if 'att_status' not in st.session_state:
+    st.session_state['att_status'] = {} # {학생id: {"status": "출석", "reason": ""}}
 
-# --- 2. 사이드바: 학교 관리 (여러 학교 추가/삭제) ---
-st.sidebar.header("🏫 학교 관리")
-new_school = st.sidebar.text_input("새 학교 추가")
-if st.sidebar.button("학교 추가"):
-    if i_school := new_school.strip():
-        st.session_state['schools'].append(i_school)
-        st.rerun()
+# --- 2. 상단 학교 관리 (학교명 + 추가버튼) ---
+st.title("📱 출결 알리미")
 
-selected_school = st.sidebar.selectbox("학교 선택", st.session_state['schools'])
-st.sidebar.write("---")
+col_sch_1, col_sch_2 = st.columns([4, 1])
+with col_sch_1:
+    selected_school = st.selectbox("학교 선택", st.session_state['schools'], label_visibility="collapsed")
+with col_sch_2:
+    if st.button("➕"):
+        st.session_state['show_add_school'] = True
 
-# --- 3. 메인 화면 구성 (탭) ---
-tab1, tab2, tab3, tab4 = st.tabs(["✅ 출결체크", "📝 명단관리", "💬 문자발송", "📊 기록조회"])
-
-# --- [Tab 1] 출결체크 화면 ---
-with tab1:
-    st.subheader(f"📍 {selected_school}")
-    sel_class = st.selectbox("반 선택", ["A반", "B반", "C반", "D반"])
-    
-    # 해당 학교/반 학생 필터링
-    df_std = st.session_state['students']
-    curr_std = df_std[(df_std['학교명'] == selected_school) & (df_std['반'] == sel_class)]
-    
-    if curr_std.empty:
-        st.info("학생이 없습니다. '명단관리' 탭에서 학생을 등록해 주세요.")
-    else:
-        st.write("---")
-        attendance_data = []
-        for i, row in curr_std.iterrows():
-            with st.container():
-                c1, c2, c3 = st.columns([2, 2, 1])
-                with c1:
-                    st.write(f"**{row['이름']}**")
-                    # 통화 버튼 (HTML tel 링크)
-                    st.markdown(f'<a href="tel:{row["연락처"]}" style="text-decoration:none;">📞 통화하기</a>', unsafe_allow_html=True)
-                with c2:
-                    status = st.radio(f"{row['이름']} 상태", ["출석", "결석"], key=f"status_{i}", horizontal=True, label_visibility="collapsed")
-                with c3:
-                    # 삭제 버튼
-                    if st.button("🗑️", key=f"del_{i}"):
-                        st.session_state['students'] = st.session_state['students'].drop(i)
-                        st.rerun()
-                
-                reason = ""
-                if status == "결석":
-                    reason = st.text_input(f"결석 사유 ({row['이름']})", key=f"reason_{i}", placeholder="사유 입력")
-                
-                attendance_data.append({
-                    '날짜': datetime.now().strftime("%Y-%m-%d"),
-                    '학교명': selected_school,
-                    '반': sel_class,
-                    '이름': row['이름'],
-                    '연락처': row['연락처'],
-                    '상태': status,
-                    '사유': reason
-                })
-                st.write("---")
-        
-        if st.button("📁 오늘의 출결 저장하기", use_container_width=True):
-            new_history = pd.DataFrame(attendance_data)
-            st.session_state['history'] = pd.concat([st.session_state['history'], new_history], ignore_index=True)
-            st.session_state['today_check'] = attendance_data # 문자 발송용 임시 저장
-            st.success("데이터가 히스토리에 저장되었습니다!")
-
-# --- [Tab 2] 명단 관리 (직접 입력 & 엑셀) ---
-with tab2:
-    st.subheader("학생 명단 관리")
-    with st.expander("➕ 학생 직접 추가"):
-        with st.form("add_std_form", clear_on_submit=True):
-            f_class = st.selectbox("반", ["A반", "B반", "C반", "D반"])
-            f_name = st.text_input("이름")
-            f_phone = st.text_input("연락처 (숫자만)")
-            if st.form_submit_button("등록", use_container_width=True):
-                new_row = pd.DataFrame({'학교명': [selected_school], '반': [f_class], '이름': [f_name], '연락처': [f_phone]})
-                st.session_state['students'] = pd.concat([st.session_state['students'], new_row], ignore_index=True)
+if st.session_state.get('show_add_school'):
+    with st.form("new_school_form"):
+        new_name = st.text_input("새 학교명 입력")
+        if st.form_submit_button("확인"):
+            if new_name:
+                st.session_state['schools'].append(new_name)
+                st.session_state['show_add_school'] = False
                 st.rerun()
 
-    with st.expander("📥 엑셀 파일로 명단 올리기"):
-        up_file = st.file_uploader("엑셀 파일 선택 (.xlsx)", type=["xlsx"])
-        if up_file:
-            up_df = pd.read_excel(up_file)
-            # 엑셀 컬럼이 '반', '이름', '연락처'라고 가정
-            up_df['학교명'] = selected_school
-            st.session_state['students'] = pd.concat([st.session_state['students'], up_df], ignore_index=True)
-            st.success("엑셀 명단 등록 성공!")
+# --- 3. 학생 추가 섹션 ---
+if st.button("👤 학생 추가", type="primary"):
+    st.session_state['show_add_std'] = True
 
-    st.write("### 전체 학생 명단")
-    st.dataframe(st.session_state['students'], use_container_width=True)
+if st.session_state.get('show_add_std'):
+    with 
+# 명단 필터링
+curr_stds = [s for s in st.session_state['students'] if s['school'] == selected_school and s['class'] == sel_cls]
 
-# --- [Tab 3] 문자 발송 (수업 시작/종료) ---
-with tab3:
-    if 'today_check' not in st.session_state:
-        st.warning("먼저 '출결체크' 탭에서 저장하기 버튼을 눌러주세요.")
-    else:
-        st.subheader("📢 단체 문자 발송 미리보기")
-        mode = st.radio("발송 시점", ["수업 시작", "수업 종료"], horizontal=True)
-        
-        for data in st.session_state['today_check']:
-            if mode == "수업 시작":
-                if data['상태'] == "출석":
-                    msg = f"[{selected_school}] {data['이름']} 학생 수업에 출석하였습니다."
-                else:
-                    msg = f"[{selected_school}] {data['이름']} 학생 수업에 결석하였습니다. 확인 부탁드립니다. (사유: {data['사유']})"
-            else: # 수업 종료
-                if data['상태'] == "출석":
-                    msg = f"[{selected_school}] {data['이름']} 학생 수업이 끝났습니다. 귀가 지도 부탁드립니다."
-                else:
-                    continue # 결석생은 종료 문자 생략
+# --- 5. 단체 문자 발송 버튼 (명단 바로 위에 배치) ---
+if curr_stds:
+    col_msg_1, col_msg_2 = st.columns(2)
+    with col_msg_1:
+        btn_start = st.button("🚀 수업시작 문자")
+    with col_msg_2:
+        btn_end = st.button("🔔 수업종료 문자")
+
+    # 문자 발송 로직 (미리보기 창)
+    if btn_start or btn_end:
+        mode = "시작" if btn_start else "종료"
+        st.subheader(f"💬 {mode} 문자 미리보기")
+        for s in curr_stds:
+            stat = st.session_state['att_status'].get(s['id'], {"status": "출석", "reason": ""})
             
-            # 개별 수정 가능한 텍스트 상자
-            final_msg = st.text_area(f"To: {data['이름']} ({data['연락처']})", value=msg, height=100)
-            # 모바일용 문자 발송 버튼
-            sms_link = f"sms:{data['연락처']}?body={final_msg}"
-            st.markdown(f'<a href="{sms_link}" style="background-color:#4CAF50; color:white; padding:10px; text-decoration:none; border-radius:5px;">📲 문자 전송 창 열기</a>', unsafe_allow_html=True)
-            st.write("---")
+            if mode == "시작":
+                if stat['status'] == "출석":
+                    msg = f"[{selected_school}] {s['name']} 학생 수업에 출석하였습니다."
+                else:
+                    msg = f"[{selected_school}] {s['name']} 학생 결석하였습니다. 확인부탁드립니다.({stat['reason']})"
+            else: # 종료
+                if stat['status'] == "출석":
+                    msg = f"[{selected_school}] {s['name']} 수업이 끝났습니다."
+                else: continue
+            
+            final_msg = st.text_area(f"To: {s['name']}", value=msg, key=f"sms_{mode}_{s['id']}")
+            st.markdown(f'<a href="sms:{s["phone"]}?body={final_msg}" style="background-color:#007bff; color:white; padding:8px; border-radius:5px; text-decoration:none;">전송하기</a>', unsafe_allow_html=True)
+        st.divider()
 
-# --- [Tab 4] 기록 조회 및 엑셀 다운로드 ---
-with tab4:
-    st.subheader("📊 출결 기록 히스토리")
-    date_list = st.session_state['history']['날짜'].unique()
-    sel_date = st.selectbox("날짜 선택", date_list if len(date_list)>0 else [datetime.now().strftime("%Y-%m-%d")])
+# --- 6. 학생 명단 루프 ---
+for s in curr_stds:
+    # 한 줄 구성을 위한 컬럼 배치
+    # 통화 | 이름 | 상태선택 | 수정/삭제
+    row_c1, row_c2, row_c3, row_c4 = st.columns([0.8, 1.2, 2.5, 0.8])
     
-    hist_df = st.session_state['history'][st.session_state['history']['날짜'] == sel_date]
-    st.dataframe(hist_df, use_container_width=True)
+    with row_c1:
+        st.markdown(f'<a href="tel:{s["phone"]}" class="tel-link">📞</a>', unsafe_allow_html=True)
     
-    if not hist_df.empty:
-        # 엑셀 다운로드 기능
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            hist_df.to_excel(writer, index=False, sheet_name='출석부')
-        processed_data = output.getvalue()
-        st.download_button(
-            label="📥 이 날짜 기록 엑셀로 받기",
-            data=processed_data,
-            file_name=f"출석부_{sel_date}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    with row_c2:
+        st.write(f"**{s['name']}**")
+    
+    with row_c3:
+        current_att = st.session_state['att_status'].get(s['id'], {"status": "출석", "reason": ""})
+        new_stat = st.radio(f"stat_{s['id']}", ["출석", "결석"], 
+                            index=0 if current_att['status'] == "출석" else 1,
+                            key=f"radio_{s['id']}", horizontal=True, label_visibility="collapsed")
+        st.session_state['att_status'][s['id']] = {"status": new_stat, "reason": current_att['reason']}
+        
+    with row_c4:
+        if st.button("✏️", key=f"edit_{s['id']}"):
+            st.session_state['edit_target'] = s['id']
+
+    # 결석 시 사유 입력창 (해당 학생 바로 아래)
+    if new_stat == "결석":
+        reason = st.text_input(f"사유 ({s['name']})", value=current_att['reason'], key=f"res_in_{s['id']}")
+        st.session_state['att_status'][s['id']]['reason'] = reason
+
+    # 수정 및 삭제 폼
+    if st.session_state.get('edit_target') == s['id']:
+        with st.form(f"edit_form_{s['id']}"):
+            u_name = st.text_input("이름 수정", value=s['name'])
+            u_phone = st.text_input("연락처 수정", value=s['phone'])
+            c_col1, c_col2 = st.columns(2)
+            if c_col1.form_submit_button("저장"):
+                s['name'] = u_name
+                s['phone'] = u_phone
+                st.session_state['edit_target'] = None
+                st.rerun()
+            if c_col2.form_submit_button("❌ 학생삭제"):
+                st.session_state['students'] = [std for std in st.session_state['students'] if std['id'] != s['id']]
+                st.session_state['edit_target'] = None
+                st.rerun()
+
+st.divider()
+
+# --- 7. 엑셀 업로드/다운로드 ---
+with st.expander("📊 엑셀 데이터 관리"):
+    up_file = st.file_uploader("명단 업로드 (엑셀)", type=["xlsx"])
+    if up_file:
+        up_df = pd.read_excel(up_file)
+        # 엑셀은 '반', '이름', '연락처' 컬럼 필요
+        for _, row in up_df.iterrows():
+            std_id = datetime.now().strftime("%H%M%S%f")
+            st.session_state['students'].append({
+                "id": std_id, "school": selected_school, "class": str(row['반']), 
+                "name": str(row['이름']), "phone": str(row['연락처'])
+            })
+        st.success("업로드 완료!")
